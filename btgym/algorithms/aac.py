@@ -78,7 +78,7 @@ class BaseAAC(object):
                  opt_momentum=0.0,
                  opt_epsilon=1e-8,
                  rollout_length=20,
-                 time_flat=False,
+                 time_flat=True,
                  episode_train_test_cycle=(1,0),
                  episode_summary_freq=2,  # every i`th environment episode
                  env_render_freq=10,  # every i`th environment episode
@@ -446,7 +446,7 @@ class BaseAAC(object):
                     else:
                         self.local_network_prime = pi_prime = self._make_dummy_policy()
 
-                    self.worker_device_callback_0() # if need more networks etc.
+                    self.worker_device_callback_0()  # if need more networks etc.
 
                     # Meant for Batch-norm layers:
                     pi.update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope='.*local.*')
@@ -697,7 +697,7 @@ class BaseAAC(object):
                         # tf.summary.scalar('roll_advantage', tf.reduce_mean(self.local_network.on_pi_adv_target)),
                     ]
                     if policy is not None:
-                        model_summaries += [ tf.summary.scalar("var_global_norm", tf.global_norm(policy.var_list))]
+                        model_summaries += [tf.summary.scalar("var_global_norm", tf.global_norm(policy.var_list))]
         else:
             model_summaries = []
         # Model stat. summary:
@@ -1261,6 +1261,8 @@ class BaseAAC(object):
 
         # Look for train episode summaries from all env runners:
 
+        # self.log.warning('data+ep_summary: {}'.format( data['ep_summary']))
+
         for stat in data['ep_summary']:
             if stat is not None:
                 for key in stat.keys():
@@ -1270,6 +1272,9 @@ class BaseAAC(object):
                         ep_summary_feeder[key] = [stat[key]]
 
         # Average values among thread_runners, if any, and write episode summary:
+
+        # self.log.warning('ep_summary_feeder: {}'.format(ep_summary_feeder))
+
         if ep_summary_feeder != {}:
             ep_summary_feed_dict = {
                 self.ep_summary[key]: np.average(list) for key, list in ep_summary_feeder.items()
@@ -1284,12 +1289,15 @@ class BaseAAC(object):
                 fetched_episode_stat = sess.run(self.ep_summary['btgym_stat_op'], ep_summary_feed_dict)
 
             self.summary_writer.add_summary(fetched_episode_stat, episode)
-            self.summary_writer.flush()
+            # self.summary_writer.flush()
 
         # Every worker writes test episode  summaries:
         test_ep_summary_feeder = {}
 
         # Look for test episode summaries:
+
+        # self.log.warning('data+test_ep_summary: {}'.format(data['test_ep_summary']))
+
         for stat in data['test_ep_summary']:
             if stat is not None:
                 for key in stat.keys():
@@ -1297,13 +1305,17 @@ class BaseAAC(object):
                         test_ep_summary_feeder[key] += [stat[key]]
                     else:
                         test_ep_summary_feeder[key] = [stat[key]]
-                        # Average values among thread_runners, if any, and write episode summary:
-            if test_ep_summary_feeder != {}:
-                test_ep_summary_feed_dict = {
-                    self.ep_summary[key]: np.average(list) for key, list in test_ep_summary_feeder.items()
-                }
-                fetched_test_episode_stat = sess.run(self.ep_summary['test_btgym_stat_op'], test_ep_summary_feed_dict)
-                self.summary_writer.add_summary(fetched_test_episode_stat, episode)
+
+        # Average values among thread_runners, if any, and write episode summary:
+
+        # self.log.warning('test_ep_summary_feeder: {}'.format(test_ep_summary_feeder))
+
+        if test_ep_summary_feeder != {}:
+            test_ep_summary_feed_dict = {
+                self.ep_summary[key]: np.average(list) for key, list in test_ep_summary_feeder.items()
+            }
+            fetched_test_episode_stat = sess.run(self.ep_summary['test_btgym_stat_op'], test_ep_summary_feed_dict)
+            self.summary_writer.add_summary(fetched_test_episode_stat, episode)
 
         # Look for renderings (chief worker only, always 0-numbered environment in a list):
         if self.task == 0:
@@ -1322,7 +1334,7 @@ class BaseAAC(object):
         # Every worker writes train episode summaries:
         if model_data is not None:
             self.summary_writer.add_summary(tf.Summary.FromString(model_data), step)
-            self.summary_writer.flush()
+        self.summary_writer.flush()
 
     def process(self, sess, **kwargs):
         """

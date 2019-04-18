@@ -129,7 +129,7 @@ class BivariateTSModel:
         # Correlation matrix instead of covariance - it is ok as it gets normalized when sampling anyway:
         rho = np.eye(2)
         rho[0, 1] = rho[1, 0] = sample['ps_corrcoef'][0]
-
+        # TODO: log-uniform sampling for s, p params
         return BivariateTSModelState(
             p=TimeSeriesModel.get_random_state(**p_params),
             s=TimeSeriesModel.get_random_state(**s_params),
@@ -169,6 +169,7 @@ class BivariateTSModel:
         assert u.shape == (2, 2), 'Expected U as 2x2 matrix, got: {}'.format(u.shape)
 
         # Z-score data:
+        # Mind swapped STD!
         norm_data = (trajectory - mean[:, None]) / np.clip(variance[:, None], 1e-8, None) ** .5
         ps_decomposition = np.matmul(u, norm_data)
 
@@ -496,7 +497,6 @@ class BivariatePriceModel(BivariateTSModel):
     """
     Wrapper class for positive-valued time-series.
     Internally works with log-transformed data.
-    Mind this when evaluating model state values.
     """
 
     def reset(self, init_trajectory):
@@ -677,6 +677,28 @@ class BivariatePriceModel(BivariateTSModel):
 
         return batch_2d, x
 
+
+class BPM(BivariatePriceModel):
+    """
+    Wrapper class with de-facto disabled analyzer
+    in favor to state lightness an computation speed.
+    """
+
+    def __init__(
+            self,
+            *args,
+            analyzer_window=None,
+            p_analyzer_grouping=None,
+            s_analyzer_grouping=None,
+            **kwargs
+    ):
+        super().__init__(
+            *args,
+            analyzer_window=[2, 2],
+            p_analyzer_grouping=None,
+            s_analyzer_grouping=None,
+            **kwargs
+        )
 
 
 

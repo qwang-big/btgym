@@ -1,12 +1,9 @@
-## <a name="title"></a>Backtrader gym Environment
-
-
-**OpenAI Gym environment API for Backtrader backtesting library.**
-
-
 ```
 ...Minimizing the mean square error on future experience.  - Richard S. Sutton
 ```
+
+## <a name="title"></a>BTGym
+Scalable event-driven RL-friendly backtesting library. Build on top of Backtrader with OpenAI Gym environment API.
 
 
 _Backtrader_ is open-source algorithmic trading library:  
@@ -51,8 +48,8 @@ of reinforcement learning theory.
 - [Description](#description)
     - [Problem setting](#problem)
     - [Data sampling approaches](#data)
-- [Reference](#reference) 
-- [Current issues and limitations](#issues)
+- [Documentation and community](#reference)
+- [Known bugs and limitations](#issues)
 - [Roadmap](#roadmap)
 - [Update news](#news)
    
@@ -159,13 +156,18 @@ _Notice: data shaping approach is under development, expect some changes. [7.01.
   furthest to most recent training data. Should be less prone to overfitting than random sampling.
 
 ****
+### <a name="reference"></a>[Documentation and Community](#title)
 
-    
-### <a name="reference"></a> [Documentation and API Reference >>](https://kismuz.github.io/btgym/)
-### [Development Wiki >>](https://github.com/Kismuz/btgym/wiki)
+- Read **[Docs and API Reference](https://kismuz.github.io/btgym/)**.
+- Browse **[Development Wiki](https://github.com/Kismuz/btgym/wiki)**.
+- Review opened and closed **[Issues](https://github.com/Kismuz/btgym/issues?utf8=%E2%9C%93&q=)**.
+- Go to **[BTGym Slack channel](https://btgym.slack.com)**. If you are new -
+[use this invite link](https://join.slack.com/t/btgym/shared_invite/enQtNTU5NDU5ODA2NjU4LTBjNGExOTc1YzkxYjYxMWFmYTYyMmIyZDFiZmZmMmU5OGI1YTdlNDk5NDk2ZjEzNmU3MDM2NDYzYzg5MTk5NTk)
+ to join.
+
 
 ****
-### <a name="issues"></a> [Current issues and limitations:](#title)
+### <a name="issues"></a> [Known bugs and limitations:](#title)
 - requres Matplotlib version 2.0.2;
 - matplotlib backend warning: appears when importing pyplot and using `%matplotlib inline` magic
   before btgym import. It's recommended to import btacktrader and btgym first to ensure proper backend
@@ -203,9 +205,19 @@ _Notice: data shaping approach is under development, expect some changes. [7.01.
  - [x] sequential and sliding time-window sampling;
  - [x] multiply instruments trading;
  - [ ] docker image;
+ - [ ] TF serving model serialisation functionality;
  
  
 ### <a name="news"></a>[News and updates:](#title)
+- 9.02.2019:
+    - **Introduction to analytic data model** notebook added to [model_based_stat_arb](./examples/model_based_stat_arb/) examples folder.
+
+- 25.01.2019: updates:
+    - **lstm_policy** class now requires both `internal` and `external` observation sub-spaces to be present and allows both be one-level nested
+        sub-spaces itself (was only true for `external`); all declared sub-spaces got encoded by separate convolution encoders;
+    - **policy deterministic action** option is implemented for discrete action spaces and can be utilised by `syncro_runner`;
+        by default it is enabled for test episodes;
+    - **data_feed** classes now accept `pd.dataframes` as historic data dource via `dataframe` kwarg (was: `.csv` files only);
 
 - 18.01.2019: updates:
     - **data model** classes are under active development to power model-based framework:

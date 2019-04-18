@@ -817,7 +817,7 @@ class BTgymBaseStrategy(bt.Strategy):
         else:
             # Now in episode termination phase,
             # just keep hitting `Close` button:
-            self.steps_till_is_done -=1
+            self.steps_till_is_done -= 1
             self.broker_message = 'CLOSE, {}'.format(self.final_message)
             self.order = self.close()
             self.log.debug(

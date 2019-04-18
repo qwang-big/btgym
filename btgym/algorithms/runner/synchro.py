@@ -11,7 +11,7 @@ from btgym.algorithms.utils import is_subdict
 
 class BaseSynchroRunner():
     """
-    Data provider class. Interacts with environment and outputs data in form of rollouts augmented with
+    Experience provider class. Interacts with environment and outputs data in form of rollouts augmented with
     relevant summaries and metadata. This runner is `synchronous` in sense that data collection is `in-process'
     and every rollout is collected by explicit call to respective `get_data()` method [this is unlike 'async-`
     thread-runner version found earlier in this this package which, once being started,
@@ -33,6 +33,7 @@ class BaseSynchroRunner():
             data_sample_config=None,
             memory_config=None,
             test_conditions=None,
+            test_deterministic=True,
             slowdown_steps=0,
             global_step_op=None,
             aux_render_modes=None,
@@ -56,6 +57,7 @@ class BaseSynchroRunner():
             memory_config:                  dict, replay memory configuration
             test_conditions:                dict or None,
                                             dictionary of single experience conditions to check to mark it as test one.
+            test_deterministic:             bool, if True - act deterministically for test episodes
             slowdown_time:                  time to sleep between steps
             aux_render_modes:               iterable of str, additional summaries to compute
             _implemented_aux_render_modes   iterable of str, implemented additional summaries
@@ -121,6 +123,10 @@ class BaseSynchroRunner():
             }
         else:
             self.test_conditions = test_conditions
+
+        # Actions handling for test runs:
+        self.test_deterministic = test_deterministic
+        # self.log.warning('test_deterministic: {}'.format(self.test_deterministic))
 
         # Make replay memory:
         if self.memory_config is not None:
@@ -220,6 +226,11 @@ class BaseSynchroRunner():
         # Pass sample config to environment (.get_sample_config() is actually aac framework method):
         init_state = self.env.reset(**data_sample_config)
 
+        # Infer train/test episode type from initial state:
+        self.is_test = is_subdict(self.test_conditions, {'state': init_state})
+
+        # self.log.warning('init_experience.is_test: {}'.format(self.is_test))
+
         # Master worker always resets context at the episode beginning:
         # TODO: !
         # if not self.data_sample_config['mode']:
@@ -241,6 +252,7 @@ class BaseSynchroRunner():
             init_context,
             init_action[None, ...],
             init_reward[None, ...],
+            self.is_test and self.test_deterministic,  # deterministic actions for test episode
         )
         next_state, reward, terminal, self.info = self.env.step(action['environment'])
 
@@ -288,7 +300,7 @@ class BaseSynchroRunner():
         # Update policy if operation has been provided:
         if policy_sync_op is not None:
             self.sess.run(policy_sync_op)
-            self.log.debug('Policy sync. ok!')
+            # self.log.debug('Policy sync. ok!')
 
         # Continue adding experiences to rollout:
         next_action, logits, value, next_context = policy.act(
@@ -296,6 +308,7 @@ class BaseSynchroRunner():
             context,
             action[None, ...],
             reward[None, ...],
+            self.is_test and self.test_deterministic,  # deterministic actions for test episode
         )
         self.ep_accum['logits'].append(logits)
         self.ep_accum['value'].append(value)
@@ -338,6 +351,7 @@ class BaseSynchroRunner():
         Returns:
             dict of stats
         """
+
         ep_stat = {}
         if not is_test:
             self.total_r += [self.reward_sum]
@@ -347,19 +361,18 @@ class BaseSynchroRunner():
             self.final_value += [last_i['broker_value']]
             self.total_steps += [episode_stat['length']]
 
-        if self.local_episode % self.episode_summary_freq == 0:
-            ep_stat = dict(
-                total_r=np.average(self.total_r),
-                cpu_time=np.average(self.cpu_time),
-                final_value=np.average(self.final_value),
-                steps=np.average(self.total_steps)
-            )
-            self.total_r = []
-            self.cpu_time = []
-            self.final_value = []
-            self.total_steps = []
-            self.total_steps_atari = []
-
+            if self.local_episode % self.episode_summary_freq == 0:
+                ep_stat = dict(
+                    total_r=np.average(self.total_r),
+                    cpu_time=np.average(self.cpu_time),
+                    final_value=np.average(self.final_value),
+                    steps=np.average(self.total_steps)
+                )
+                self.total_r = []
+                self.cpu_time = []
+                self.final_value = []
+                self.total_steps = []
+                self.total_steps_atari = []
         return ep_stat
 
     def get_test_stat(self, is_test=False):
@@ -448,7 +461,6 @@ class BaseSynchroRunner():
             rollout_length = self.rollout_length
 
         rollout = Rollout()
-        is_test = False
         train_ep_summary = None
         test_ep_summary = None
         render_ep_summary = None
@@ -482,10 +494,13 @@ class BaseSynchroRunner():
                 self.last_reward = None
 
                 self.terminal_end = True
+                train_ep_summary = self.get_train_stat(self.is_test)
+                test_ep_summary = self.get_test_stat(self.is_test)
+                render_ep_summary = self.get_ep_render(self.is_test)
 
-                train_ep_summary = self.get_train_stat(is_test)
-                test_ep_summary = self.get_test_stat(is_test)
-                render_ep_summary = self.get_ep_render(is_test)
+                # self.log.debug(
+                #     'terminal, train_summary: {}, test_summary: {}'.format(train_ep_summary, test_ep_summary)
+                # )
 
             else:
                 experience, self.state, self.context, self.last_action, self.last_reward = self.get_experience(
@@ -503,19 +518,10 @@ class BaseSynchroRunner():
             rollout.add(self.pre_experience)
 
             # Where are you coming from?
-            is_test = is_subdict(self.test_conditions, self.pre_experience)
-
-            # try:
-            #     # Was it test (i.e. test episode from traget domain)?
-            #     if self.pre_experience['state']['metadata']['type']\
-            #             and self.pre_experience['state']['metadata']['trial_type']:
-            #         is_test = True
-            #
-            # except KeyError:
-            #     pass
+            # self.is_test is updated by self.get_init_experience()
 
             # Only training rollouts are added to replay memory:
-            if not is_test:
+            if not self.is_test:
                 self.memory.add(self.pre_experience)
 
             self.reward_sum += self.pre_experience['reward']
@@ -537,11 +543,12 @@ class BaseSynchroRunner():
                 ]
             )
             rollout.add(self.pre_experience)
-            if not is_test:
+            if not self.is_test:
                 self.memory.add(self.pre_experience)
 
         # self.log.warning('rollout.terminal: {}'.format(self.terminal_end))
         # self.log.warning('rollout.size: {}'.format(rollout.size))
+        # self.log.warning('rollout.is_test: {}'.format(self.is_test))
 
         data = dict(
             on_policy=rollout,
@@ -551,7 +558,7 @@ class BaseSynchroRunner():
             ep_summary=train_ep_summary,
             test_ep_summary=test_ep_summary,
             render_summary=render_ep_summary,
-            is_test=is_test,
+            is_test=self.is_test,
         )
         return data
 
@@ -640,117 +647,6 @@ class BaseSynchroRunner():
             terminal_context=terminal_context,
         )
         return data
-
-    # def get_episode(self, policy=None, policy_sync_op=None, init_context=None, data_sample_config=None):
-    #     """
-    #     == WRONG DO NOT USE ===
-    #     Collects entire episode trajectory as single rollout and bunch of summaries using specified policy.
-    #     Updates episode statistics and replay memory.
-    #
-    #     Args:
-    #         policy:                 policy to execute
-    #         policy_sync_op:         operation copying local behavioural policy params from global one
-    #         init_context:           if specified, overrides initial episode context provided bu self.context
-    #         data_sample_config:     environment configuration parameters for next episode to sample:
-    #                                 configuration dictionary of type `btgym.datafeed.base.EnvResetConfig
-    #
-    #     Returns:
-    #             data dictionary
-    #     """
-    #     if policy is None:
-    #         policy = self.policy
-    #
-    #     if init_context is None:
-    #         init_context = self.context
-    #
-    #     elif init_context == 0:  # mmm... TODO: fix this shame
-    #         init_context = None
-    #
-    #     rollout = Rollout()
-    #     train_ep_summary = None
-    #     test_ep_summary = None
-    #     render_ep_summary = None
-    #
-    #     # Start new episode:
-    #     self.pre_experience, self.state, self.context, self.last_action, self.last_reward = self.get_init_experience(
-    #         policy=policy,
-    #         policy_sync_op=policy_sync_op,
-    #         init_context=init_context,  # None (initially) or final context of previous episode
-    #         data_sample_config=data_sample_config
-    #     )
-    #
-    #     is_test = is_subdict(self.test_conditions, self.pre_experience)
-    #     # try:
-    #     #     # Was it test (`type` in metadata is not zero)?
-    #     #     # TODO: change to source/target?
-    #     #     if self.pre_experience['state']['metadata']['type']:
-    #     #         is_test = True
-    #     #
-    #     # except KeyError:
-    #     #     pass
-    #
-    #     # Collect data until episode is over:
-    #
-    #     while not self.terminal_end:
-    #         experience, self.state, self.context, self.last_action = self.get_experience(
-    #             policy=policy,
-    #             policy_sync_op=policy_sync_op,
-    #             state=self.state,
-    #             context=self.context,
-    #             action=self.last_action,
-    #             reward=self.last_reward,
-    #         )
-    #         # Complete previous experience by bootstrapping V from next one:
-    #         self.pre_experience['r'] = experience['value']
-    #         # Push:
-    #         rollout.add(self.pre_experience)
-    #
-    #         if not is_test:
-    #             self.memory.add(self.pre_experience)
-    #
-    #         # Move one step froward:
-    #         self.pre_experience = experience
-    #
-    #         self.reward_sum += experience['reward']
-    #
-    #         if self.pre_experience['terminal']:
-    #             # Episode has been just finished,
-    #             # need to complete and push last experience and update all episode summaries:
-    #             self.terminal_end = True
-    #
-    #     # Bootstrap:
-    #     # TODO: should be zero here
-    #     self.pre_experience['r'] = np.asarray(
-    #         [
-    #             policy.get_value(
-    #                 self.pre_experience['state'],
-    #                 self.pre_experience['context'],
-    #                 self.pre_experience['last_reward'][None, ...],
-    #                 self.pre_experience['last_reward'][None, ...],
-    #             )
-    #         ]
-    #     )
-    #     rollout.add(self.pre_experience)
-    #     if not is_test:
-    #         self.memory.add(self.pre_experience)
-    #
-    #     train_ep_summary = self.get_train_stat(is_test)
-    #     test_ep_summary = self.get_test_stat(is_test)
-    #     render_ep_summary = self.get_ep_render(is_test)
-    #
-    #     # self.log.warning('episodic_rollout.size: {}'.format(rollout.size))
-    #
-    #     data = dict(
-    #         on_policy=rollout,
-    #         terminal=self.terminal_end,
-    #         off_policy=self.memory.sample_uniform(sequence_size=self.rollout_length),
-    #         off_policy_rp=self.memory.sample_priority(exact_size=True),
-    #         ep_summary=train_ep_summary,
-    #         test_ep_summary=test_ep_summary,
-    #         render_summary=render_ep_summary,
-    #         is_test=is_test,
-    #     )
-    #     return data
 
 
 class VerboseSynchroRunner(BaseSynchroRunner):

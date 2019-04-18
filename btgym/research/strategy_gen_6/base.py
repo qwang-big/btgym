@@ -235,6 +235,13 @@ class BaseStrategy6(bt.Strategy):
             unimodal_stake = {name: self.p.order_size for name in self.getdatanames()}
             self.p.order_size = unimodal_stake
 
+        # Current effective order sizes:
+        self.current_order_sizes = None
+        self.margin_reserve = 0.01
+
+        # Current stat normalisation:
+        self.normalizer = 1.0
+
         # self.log.warning('asset names: {}'.format(self.p.asset_names))
         # self.log.warning('data names: {}'.format(self.getdatanames()))
 
@@ -316,19 +323,16 @@ class BaseStrategy6(bt.Strategy):
         # define normalisation bounds (can be overiden via .set_datalines()):
         self.stat_asset = self.data.open
 
-        # TODO: rewrite if orders are not of the same size
-        self.order_size_normalizer = np.fromiter(self.p.order_size.values(), dtype=np.float).mean()
-
         # Add custom data Lines if any [and possibly redefine stat_asset and order_size_normalizer]:
         self.set_datalines()
 
         # Normalisation statistics estimator (updated via update_broker_stat.()):
-        self.norm_estimator = Zscore(1, alpha=self.p.norm_alpha)
+        self.norm_stat_tracker = Zscore(1, alpha=self.p.norm_alpha)
         self.normalisation_state = NormalisationState(0, 0, .9, 1.1)
 
         # State exp. smoothing params:
-        self.internal_state_discount = np.cumprod(np.tile(1 - 1 / self.p.avg_period, self.p.avg_period))[::-1]
-        self.external_state_discount = None  # not used
+        # self.internal_state_discount = np.cumprod(np.tile(1 - 1 / self.p.avg_period, self.p.avg_period))[::-1]
+        # self.external_state_discount = None  # not used
 
         # Define flat collection dictionary looking for methods for estimating observation state,
         # one method per one mode, should be named .get_[mode_name]_state():
@@ -377,7 +381,7 @@ class BaseStrategy6(bt.Strategy):
             self.update_broker_stat()
 
         elif self.pre_iteration + 2 == self.p.time_dim - self.avg_period:
-            _ = self.norm_estimator.reset(
+            _ = self.norm_stat_tracker.reset(
                 np.asarray(self.stat_asset.get(size=self.data.close.buflen()))[None, :]
             )
 
@@ -442,6 +446,11 @@ class BaseStrategy6(bt.Strategy):
         # ...normalisation bounds:
         norm_state = self.get_normalisation()
 
+        # ..current order sizes:
+
+        # order_sizes = self.get_order_sizes()
+
+
         # ...individual positions for each instrument traded:
         positions = [self.env.broker.getposition(data) for data in self.datas]
 
@@ -449,7 +458,16 @@ class BaseStrategy6(bt.Strategy):
         exposure = sum([abs(pos.size) for pos in positions])
 
         # ... tracking normalisation constant:
-        normalizer = 1 / (norm_state.up_interval - norm_state.low_interval) / self.order_size_normalizer
+
+        self.normalizer = 1 / np.clip(
+            (norm_state.up_interval - norm_state.low_interval),
+            1e-8,
+            None
+        )
+
+        # print('norm_state: ', norm_state)
+        # print('normalizer: ', normalizer)
+        # print('self.current_order_sizes: ', self.current_order_sizes)
 
         for key, method in self.collection_get_broker_stat_methods.items():
             update = method(
@@ -458,7 +476,7 @@ class BaseStrategy6(bt.Strategy):
                 exposure=exposure,
                 lower_bound=norm_state.low_interval,
                 upper_bound=norm_state.up_interval,
-                normalizer=normalizer,
+                normalizer=self.normalizer,
             )
             # Update accumulator:
             self.broker_stat[key] = np.concatenate([self.broker_stat[key][1:], np.asarray([float(update)])])
@@ -475,8 +493,9 @@ class BaseStrategy6(bt.Strategy):
             instance of NormalisationState tuple
         """
         # Update normalizer stat:
-        stat_data = np.asarray(self.stat_asset.get(size=self.p.skip_frame))
-        mean, var = self.norm_estimator.update(stat_data[None, :])
+        stat_data = np.asarray(self.stat_asset.get(size=1))
+        mean, var = self.norm_stat_tracker.update(stat_data[None, :])
+        var = np.clip(var, 1e-8, None)
 
         # Use 99% N(stat_data_mean, stat_data_std) intervals as normalisation interval:
         intervals = stats.norm.interval(.99, mean, var ** .5)
@@ -487,6 +506,17 @@ class BaseStrategy6(bt.Strategy):
             up_interval=intervals[1][0]
         )
         return self.normalisation_state
+
+    def get_order_sizes(self):
+        """
+        Estimates current order sizes for assets in trade, sets attribute.
+
+        Returns:
+            array-like of floats
+        """
+        # Default implementation for fixed-size orders:
+        self.current_order_sizes = np.fromiter(self.p.order_size.values(), dtype=np.float)
+        return self.current_order_sizes
 
     def get_broker_value(self, current_value, normalizer, **kwargs):
         """
@@ -499,13 +529,7 @@ class BaseStrategy6(bt.Strategy):
         Returns:
             broker value normalized w.r.t. start value.
         """
-        # return norm_value(
-        #     current_value,
-        #     self.env.broker.startingcash,
-        #     lower_bound,
-        #     upper_bound,
-        # )
-        return (current_value - self.env.broker.startingcash) / self.env.broker.startingcash * normalizer
+        return (current_value - self.env.broker.startingcash) / self.env.broker.startingcash / self.p.leverage #* normalizer
 
     def get_broker_cash(self, current_value, **kwargs):
         """
@@ -517,7 +541,7 @@ class BaseStrategy6(bt.Strategy):
         """
         return self.env.broker.get_cash() / current_value
 
-    def get_broker_exposure(self, exposure, **kwargs):
+    def get_broker_exposure(self, exposure, normalizer, **kwargs):
         """
         Args:
             exposure:   float, current total position exposure
@@ -525,7 +549,7 @@ class BaseStrategy6(bt.Strategy):
         Returns:
             exposure (position size) normalized w.r.t. single order size.
         """
-        return exposure / self.order_size_normalizer
+        return exposure * normalizer #/ self.current_order_sizes.mean()
 
     def get_broker_realized_pnl(self, normalizer, **kwargs):
         """
@@ -539,7 +563,6 @@ class BaseStrategy6(bt.Strategy):
 
         if self.trade_just_closed:
             pnl = self.trade_result * normalizer
-            # pnl = self.trade_result / (upper_bound - lower_bound)
 
         else:
             pnl = 0.0
@@ -561,7 +584,7 @@ class BaseStrategy6(bt.Strategy):
 
     def get_broker_total_unrealized_pnl(self, current_value, normalizer, **kwargs):
         """
-
+        REDUNDANT
         Args:
             current_value:  float, current portfolio value
             normalizer:     float, normalisation constant
@@ -570,7 +593,7 @@ class BaseStrategy6(bt.Strategy):
         Returns:
             normalized profit/loss wrt. initial portfolio value
         """
-        pnl = (current_value - self.env.broker.startingcash) * normalizer
+        pnl = (current_value - self.env.broker.startingcash) * self.env.broker.startingcash
 
         return pnl
 
@@ -682,13 +705,13 @@ class BaseStrategy6(bt.Strategy):
         return self.raw_state
 
     def get_stat_state(self):
-        return np.asarray(self.norm_estimator.get_state())
+        return np.asarray(self.norm_stat_tracker.get_state())
 
     def get_internal_state(self):
         stat_lines = ('value', 'unrealized_pnl', 'realized_pnl', 'cash', 'exposure')
         # Use smoothed values:
         x_broker = np.stack(
-            [np.asarray(self.broker_stat[name]) * self.internal_state_discount for name in stat_lines],
+            [np.asarray(self.broker_stat[name]) for name in stat_lines],
             axis=-1
         )
         # x_broker = np.gradient(x_broker, axis=-1)
@@ -746,7 +769,7 @@ class BaseStrategy6(bt.Strategy):
         Collects estimated values for every mode of observation space by calling methods from
         `collection_get_state_methods` dictionary.
         As a rule, this method should not be modified, override or implement corresponding get_[mode]_state() methods,
-        defining necessary calculations and return arbitrary shaped tensors for every space mode.
+        defining necessary calculations and return properly shaped tensors for every space mode.
 
         Note:
             - 'data' referes to bt.startegy datafeeds and should be treated as such.
@@ -810,7 +833,7 @@ class BaseStrategy6(bt.Strategy):
         realized_pnl = np.asarray(self.broker_stat['realized_pnl'])[-self.p.skip_frame:].sum()
 
         # Weights are subject to tune:
-        self.reward = (1.0 * f1 + 1.0 * realized_pnl) * self.p.reward_scale
+        self.reward = (0.1 * f1 + 1.0 * realized_pnl) * self.p.reward_scale #/ self.normalizer
         # self.reward = np.clip(self.reward, -self.p.reward_scale, self.p.reward_scale)
         self.reward = np.clip(self.reward, -1e3, 1e3)
 
@@ -878,6 +901,13 @@ class BaseStrategy6(bt.Strategy):
             ]
             # Append custom get_done() results, if any:
             is_done_rules += [self.get_done()]
+
+            # self.log.debug(
+            #     'iteration: {}, condition: {}'.format(
+            #         self.iteration,
+            #         self.data.numrecords - self.inner_embedding - self.p.skip_frame - self.steps_till_is_done
+            #     )
+            # )
 
             # Sweep through rules:
             for (condition, message) in is_done_rules:
